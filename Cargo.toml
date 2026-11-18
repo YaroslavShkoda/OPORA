@@ -4,3 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.104"
+chrono = "0.4.45"
+eframe = "0.37.0"
+egui_plot = "0.38.0"
+rusqlite = { version = "0.43.0", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
