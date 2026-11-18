@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod theme;
 
 use eframe::egui;
 
@@ -19,8 +20,8 @@ fn main() -> anyhow::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([720.0, 560.0])
-            .with_min_inner_size([520.0, 420.0])
+            .with_inner_size([900.0, 640.0])
+            .with_min_inner_size([720.0, 520.0])
             .with_title("OPORA"),
         wgpu_options: wgpu_options(),
         ..Default::default()
@@ -29,7 +30,7 @@ fn main() -> anyhow::Result<()> {
     eframe::run_native(
         "OPORA",
         options,
-        Box::new(move |_cc| Ok(Box::new(app::App::new(conn)))),
+        Box::new(move |cc| Ok(Box::new(app::App::new(conn, &cc.egui_ctx)))),
     )?;
     Ok(())
 }
