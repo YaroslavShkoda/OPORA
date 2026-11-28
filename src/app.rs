@@ -28,6 +28,8 @@ enum Section {
     Notes,
     Tasks,
     Goals,
+    /// Пока пустой раздел: появится позже, но место в навигации уже есть.
+    Settings,
 }
 
 impl Section {
@@ -44,16 +46,18 @@ impl Section {
             Section::Notes => "Заметки",
             Section::Tasks => "Дела",
             Section::Goals => "Цели",
+            Section::Settings => "Настройки",
         }
     }
 
-    /// Ключ для таблицы `items`; у «Сна» своих строк нет.
+    /// Ключ для таблицы `items`; у «Сна» и «Настроек» своих строк нет.
     fn key(self) -> &'static str {
         match self {
             Section::Sleep => "sleep",
             Section::Notes => "notes",
             Section::Tasks => "tasks",
             Section::Goals => "goals",
+            Section::Settings => "settings",
         }
     }
 
@@ -119,12 +123,12 @@ pub struct App {
     dream_unknown: bool,
     /// Заметка, открытая на весь экран. Пока одна на всё приложение.
     note_draft: Option<NoteDraft>,
-    /// Режим заметки: false — редактор, true — просмотр markdown.
-    note_preview: bool,
     /// Новая строка дела/цели, которую ещё не создали.
     task_draft: Option<TaskDraft>,
     status: Option<String>,
     error: Option<String>,
+    /// Лёгкое уведомление справа сверху: текст и момент, когда его гасить.
+    toast: Option<(String, f64)>,
     /// Последние 30 дней — то, во что превращается нажатие «Сохранить».
     entries: Vec<Entry>,
     /// День, удаление которого ждёт подтверждения.
@@ -138,8 +142,8 @@ pub struct App {
 impl App {
     pub fn new(conn: Connection, ctx: &egui::Context) -> Self {
         theme::install(ctx);
-        // Масштаб интерфейса: 100% на этой машине читается мелко.
-        ctx.set_zoom_factor(1.15);
+        // Стартовый масштаб — как после Ctrl+0, независимо от прошлой сессии.
+        ctx.set_zoom_factor(1.0);
 
         let mut app = Self {
             conn,
@@ -151,10 +155,10 @@ impl App {
             note: String::new(),
             dream_unknown: false,
             note_draft: None,
-            note_preview: false,
             task_draft: None,
             status: None,
             error: None,
+            toast: None,
             entries: Vec::new(),
             pending_delete: None,
             focus_new: false,
@@ -282,9 +286,13 @@ impl App {
                     .task_draft
                     .as_ref()
                     .is_some_and(|draft| draft.section == self.section),
-                Section::Sleep => false,
+                Section::Sleep | Section::Settings => false,
             };
-            if self.section != Section::Sleep && !editing {
+            if matches!(
+                self.section,
+                Section::Notes | Section::Tasks | Section::Goals
+            ) && !editing
+            {
                 let remaining = ui.available_width();
                 ui.allocate_ui_with_layout(
                     egui::vec2(remaining, 104.0),
@@ -300,17 +308,14 @@ impl App {
 
         if add {
             match self.section {
-                Section::Notes => {
-                    self.note_draft = Some(NoteDraft::default());
-                    self.note_preview = false;
-                }
+                Section::Notes => self.note_draft = Some(NoteDraft::default()),
                 Section::Tasks | Section::Goals => {
                     self.task_draft = Some(TaskDraft {
                         section: self.section,
                         text: String::new(),
                     });
                 }
-                Section::Sleep => {}
+                Section::Sleep | Section::Settings => {}
             }
             self.focus_new = true;
         }
@@ -322,46 +327,85 @@ impl App {
             ui.vertical(|ui| {
                 ui.add_space(8.0);
                 for section in Section::ALL {
-                    let (rect, response) =
-                        ui.allocate_exact_size(egui::vec2(NAV_W, NAV_ITEM_H), egui::Sense::click());
-
-                    let selected = self.section == section;
-                    let color = if selected {
-                        theme::ACCENT
-                    } else if response.hovered() {
-                        theme::TEXT
-                    } else {
-                        theme::TEXT_DIM
-                    };
-                    if response.hovered() {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                    }
-                    if response.clicked() && self.section != section {
-                        // Незаконченные строки не теряем при переходе.
-                        self.commit_task();
-                        self.finish_note();
-                        self.section = section;
-                    }
-
-                    // Значок и подпись — по одной вертикальной оси.
-                    let icon_rect = egui::Rect::from_min_size(
-                        egui::pos2(rect.center().x - 11.0, rect.top() + 6.0),
-                        egui::vec2(22.0, 22.0),
-                    );
-                    let painter = ui.painter();
-                    section_icon(painter, icon_rect, section, color);
-                    painter.text(
-                        egui::pos2(rect.center().x, rect.top() + 37.0),
-                        Align2::CENTER_TOP,
-                        section.title(),
-                        theme::body(15.0),
-                        color,
-                    );
-
+                    self.nav_item(ui, section);
                     ui.add_space(NAV_GAP);
                 }
+                // Настройки — отдельно, у нижнего края панели.
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                    ui.add_space(8.0);
+                    self.nav_item(ui, Section::Settings);
+                });
             });
         });
+    }
+
+    fn nav_item(&mut self, ui: &mut egui::Ui, section: Section) {
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(NAV_W, NAV_ITEM_H), egui::Sense::click());
+
+        let selected = self.section == section;
+        let color = if selected {
+            theme::ACCENT
+        } else if response.hovered() {
+            theme::TEXT
+        } else {
+            theme::TEXT_DIM
+        };
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if response.clicked() && self.section != section {
+            // Незаконченные строки не теряем при переходе.
+            self.commit_task();
+            self.finish_note();
+            self.section = section;
+        }
+
+        // Значок и подпись — по одной вертикальной оси.
+        let icon_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.center().x - 11.0, rect.top() + 6.0),
+            egui::vec2(22.0, 22.0),
+        );
+        let painter = ui.painter();
+        section_icon(painter, icon_rect, section, color);
+        painter.text(
+            egui::pos2(rect.center().x, rect.top() + 37.0),
+            Align2::CENTER_TOP,
+            section.title(),
+            theme::body(15.0),
+            color,
+        );
+    }
+
+    /// Лёгкое уведомление справа сверху; гаснет само через пару секунд.
+    fn show_toast(&mut self, ctx: &egui::Context) {
+        let Some((message, until)) = self.toast.clone() else {
+            return;
+        };
+        let now = ctx.input(|i| i.time);
+        if now >= until {
+            self.toast = None;
+            return;
+        }
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64((until - now).max(0.01)));
+        egui::Area::new(egui::Id::unique("toast"))
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-24.0, 18.0))
+            .order(egui::Order::Foreground)
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::NONE
+                    .fill(theme::SURFACE)
+                    .stroke(Stroke::new(1.0, theme::LINE))
+                    .corner_radius(6.0)
+                    .inner_margin(egui::Margin::symmetric(14, 9))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(&message)
+                                .font(theme::body(13.5))
+                                .color(theme::TEXT),
+                        );
+                    });
+            });
     }
 
     /// Содержимое открытого раздела.
@@ -384,6 +428,8 @@ impl App {
             Section::Sleep => self.day_form(ui),
             Section::Notes => self.notes_grid(ui),
             Section::Tasks | Section::Goals => self.checklist_page(ui),
+            // Настройки появятся позже; пока только место в навигации.
+            Section::Settings => {}
         }
     }
 
@@ -395,10 +441,20 @@ impl App {
             .as_ref()
             .is_some_and(|draft| draft.section == section);
 
-        // Ctrl+Enter создаёт набранное дело. Проверяем до отрисовки полей,
-        // чтобы Enter не успел вставиться в текст.
-        if has_draft && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter)) {
-            self.commit_task();
+        // Ctrl+Enter создаёт набранное дело и сразу открывает следующую строку.
+        // Событие забираем до полей, чтобы Enter не вставился в текст.
+        if has_draft
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter))
+            && self.commit_task()
+        {
+            self.task_draft = Some(TaskDraft {
+                section,
+                text: String::new(),
+            });
+            // Пустая строка с тем же id: старый курсор сюда не переносим.
+            let draft_id = egui::Id::unique(("task-draft", section.key()));
+            egui::TextEdit::store_state(ui.ctx(), draft_id, Default::default());
+            self.focus_new = true;
         }
 
         let mut any = false;
@@ -439,7 +495,10 @@ impl App {
                 ui.add_space(6.0);
 
                 let width = ui.available_width();
+                let field_id = egui::Id::unique(("item-text", item.id));
+                auto_close(ui, field_id, &mut item.text);
                 let mut field = egui::TextEdit::singleline(&mut item.text)
+                    .id(field_id)
                     .frame(egui::Frame::NONE)
                     .hint_text(hint)
                     .desired_width(width)
@@ -485,8 +544,11 @@ impl App {
                 ui.add_space(6.0);
 
                 let width = ui.available_width();
+                let draft_id = egui::Id::unique(("task-draft", section.key()));
+                auto_close(ui, draft_id, &mut draft.text);
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut draft.text)
+                        .id(draft_id)
                         .frame(egui::Frame::NONE)
                         .hint_text(hint)
                         .desired_width(width)
@@ -511,29 +573,36 @@ impl App {
     }
 
     /// Переносит набранное дело/цель в список.
-    fn commit_task(&mut self) {
+    /// Сохраняет набранное дело или цель. Возвращает true, если строка создана.
+    fn commit_task(&mut self) -> bool {
         self.error = None;
         let Some(draft) = self.task_draft.take() else {
-            return;
+            return false;
         };
         let text = draft.text.trim().to_string();
         if text.is_empty() {
-            return;
+            // Пустую строку не теряем: Ctrl+Enter на ней просто ничего не делает.
+            self.task_draft = Some(draft);
+            return false;
         }
         match db::insert_item(&self.conn, draft.section.key(), "", &text, false) {
-            Ok(id) => self.items.push(Item {
-                id,
-                section: draft.section,
-                title: String::new(),
-                text,
-                done: false,
-            }),
+            Ok(id) => {
+                self.items.push(Item {
+                    id,
+                    section: draft.section,
+                    title: String::new(),
+                    text,
+                    done: false,
+                });
+                true
+            }
             Err(err) => {
                 self.error = Some(format!("не удалось сохранить дело: {err}"));
                 self.task_draft = Some(TaskDraft {
                     section: draft.section,
                     text,
                 });
+                false
             }
         }
     }
@@ -550,36 +619,24 @@ impl App {
             }
 
             let mut save = false;
-            let mut toggle_preview = false;
             let focus = std::mem::take(&mut self.focus_new);
 
             ui.horizontal(|ui| {
-                let button = egui::Button::new(
-                    RichText::new("Сохранить")
-                        .font(theme::body(15.0))
-                        .color(theme::BG),
-                )
-                .fill(theme::ACCENT)
-                .min_size(egui::vec2(150.0, 38.0));
-                if ui.add(button).clicked() {
-                    save = true;
-                }
                 if link(ui, "← к заметкам").clicked() {
                     save = true;
                 }
-                if link(
-                    ui,
-                    if self.note_preview {
-                        "Редактор"
-                    } else {
-                        "Просмотр"
-                    },
-                )
-                .clicked()
-                {
-                    toggle_preview = true;
-                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let button = egui::Button::new(
+                        RichText::new("Сохранить")
+                            .font(theme::body(15.0))
+                            .color(theme::BG),
+                    )
+                    .fill(theme::ACCENT)
+                    .min_size(egui::vec2(150.0, 38.0));
+                    if ui.add(button).clicked() {
+                        save = true;
+                    }
+                    ui.add_space(8.0);
                     ui.label(
                         RichText::new("Ctrl + Enter — готово")
                             .font(theme::body(12.5))
@@ -587,9 +644,6 @@ impl App {
                     );
                 });
             });
-            if toggle_preview {
-                self.note_preview = !self.note_preview;
-            }
             ui.add_space(18.0);
 
             if let Some(err) = &self.error {
@@ -605,8 +659,11 @@ impl App {
                 return;
             };
             let width = ui.available_width();
+            let title_id = egui::Id::unique("note-title");
+            auto_close(ui, title_id, &mut draft.title);
             let title = ui.add(
                 egui::TextEdit::singleline(&mut draft.title)
+                    .id(title_id)
                     .frame(egui::Frame::NONE)
                     .hint_text("Название")
                     .desired_width(width)
@@ -619,52 +676,28 @@ impl App {
             ui.add_space(14.0);
 
             let field_height = (ui.available_height() - 18.0).max(160.0);
-            if self.note_preview {
-                egui::Frame::NONE
-                    .stroke(Stroke::new(1.0, theme::LINE))
-                    .corner_radius(4.0)
-                    .inner_margin(egui::Margin::symmetric(10, 8))
-                    .show(ui, |ui| {
-                        ui.set_width(width - 22.0);
-                        ui.set_height(field_height);
-                        egui::ScrollArea::vertical()
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                markdown_preview(ui, &draft.text);
-                            });
-                    });
-            } else {
-                let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
-                    note_layouter(ui, text.as_str(), wrap_width)
-                };
-                let body = egui::Frame::NONE
-                    .stroke(Stroke::new(1.0, theme::LINE))
-                    .corner_radius(4.0)
-                    .inner_margin(egui::Margin::symmetric(10, 8))
-                    .show(ui, |ui| {
-                        let body_id = egui::Id::unique("note-body");
-                        auto_close(ui, body_id, &mut draft.text);
-                        ui.add_sized(
-                            egui::vec2(width - 22.0, field_height),
-                            egui::TextEdit::multiline(&mut draft.text)
-                                .id(body_id)
-                                .frame(egui::Frame::NONE)
-                                .layouter(&mut layouter),
-                        )
-                    })
-                    .inner;
-
-                // Enter в списке продолжает нумерацию или тире.
-                let plain_enter = ui.input(|i| {
-                    i.key_pressed(egui::Key::Enter)
-                        && !i.modifiers.shift
-                        && !i.modifiers.command
-                        && !i.modifiers.alt
+            let body_id = egui::Id::unique("note-body");
+            // Enter обрабатываем до TextEdit: иначе маркер списка появляется
+            // на кадр позже и курсор успевает мигнуть на старом месте.
+            handle_enter(ui, body_id, &mut draft.text);
+            let active_line = cursor_line(ui.ctx(), body_id, &draft.text);
+            let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
+                note_layouter(ui, text.as_str(), wrap_width, active_line)
+            };
+            egui::Frame::NONE
+                .stroke(Stroke::new(1.0, theme::LINE))
+                .corner_radius(4.0)
+                .inner_margin(egui::Margin::symmetric(10, 8))
+                .show(ui, |ui| {
+                    auto_close(ui, body_id, &mut draft.text);
+                    ui.add_sized(
+                        egui::vec2(width - 22.0, field_height),
+                        egui::TextEdit::multiline(&mut draft.text)
+                            .id(body_id)
+                            .frame(egui::Frame::NONE)
+                            .layouter(&mut layouter),
+                    );
                 });
-                if plain_enter && body.has_focus() {
-                    continue_list(&mut draft.text, ui.ctx(), body.id);
-                }
-            }
 
             if save {
                 self.finish_note();
@@ -677,6 +710,7 @@ impl App {
         let mut any = false;
         let mut open = None;
         let mut delete = None;
+        let mut copied = false;
 
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(12.0, 12.0);
@@ -749,10 +783,16 @@ impl App {
                 if response.clicked() {
                     open = Some(index);
                 }
+                // Правая кнопка сразу копирует заметку: одним нажатием.
+                if response.clicked_by(egui::PointerButton::Secondary) {
+                    ui.ctx().copy_text(note_clipboard_text(item));
+                    copied = true;
+                }
                 response.context_menu(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 4.0);
                     if menu_action(ui, "Скопировать", theme::TEXT, MenuIcon::Copy) {
                         ui.ctx().copy_text(note_clipboard_text(item));
+                        copied = true;
                         ui.close();
                     }
                     ui.separator();
@@ -764,6 +804,10 @@ impl App {
             }
         });
 
+        if copied {
+            let until = ui.input(|i| i.time) + 2.0;
+            self.toast = Some(("Скопировано в буфер".to_owned(), until));
+        }
         if let Some(index) = delete {
             self.delete_note(index);
         }
@@ -801,7 +845,6 @@ impl App {
             text: item.text.clone(),
             editing: Some(index),
         });
-        self.note_preview = false;
         self.focus_new = true;
     }
 
@@ -913,15 +956,18 @@ impl App {
         // за нижний край развёрнутого окна.
         let action = 64.0;
         let width = (ui.available_width() - action - 8.0).max(200.0);
+        let dream_id = egui::Id::unique("dream-note");
         ui.horizontal_top(|ui| {
             egui::Frame::NONE
                 .stroke(Stroke::new(1.0, theme::LINE))
                 .corner_radius(4.0)
                 .inner_margin(egui::Margin::symmetric(10, 8))
                 .show(ui, |ui| {
+                    auto_close(ui, dream_id, &mut self.note);
                     ui.add_sized(
                         egui::vec2(width - 22.0, 88.0),
                         egui::TextEdit::multiline(&mut self.note)
+                            .id(dream_id)
                             .frame(egui::Frame::NONE)
                             .font(theme::body(17.0)),
                     );
@@ -1218,6 +1264,23 @@ fn section_icon(painter: &egui::Painter, rect: egui::Rect, section: Section, col
             painter.circle_stroke(rect.center(), rect.width() * 0.24, stroke);
             painter.circle_filled(rect.center(), 1.7, color);
         }
+        Section::Settings => {
+            let center = rect.center();
+            let radius = rect.width() * 0.28;
+            painter.circle_stroke(center, radius, stroke);
+            for tooth in 0..8 {
+                let angle = tooth as f32 * std::f32::consts::TAU / 8.0;
+                let direction = egui::vec2(angle.cos(), angle.sin());
+                painter.line_segment(
+                    [
+                        center + direction * (radius + 1.0),
+                        center + direction * (radius + 4.0),
+                    ],
+                    Stroke::new(1.8, color),
+                );
+            }
+            painter.circle_filled(center, 1.8, color);
+        }
     }
 }
 
@@ -1486,40 +1549,154 @@ fn continue_list(text: &mut String, ctx: &egui::Context, id: egui::Id) {
     state.store(ctx, id);
 }
 
-/// Раскладка заметки: продолжения строк списка сдвинуты под текст, а не под маркер.
-fn note_layouter(ui: &egui::Ui, text: &str, wrap_width: f32) -> std::sync::Arc<egui::Galley> {
+fn text_width(ui: &egui::Ui, text: &str, font: egui::FontId) -> f32 {
+    let job = egui::text::LayoutJob::simple(text.to_owned(), font, theme::TEXT, f32::INFINITY);
+    ui.fonts_mut(|fonts| fonts.layout_job(job).rect.width())
+}
+
+/// Начало заголовка: сколько символов спрятать и каким кеглем рисовать текст.
+fn heading_prefix(line: &str) -> Option<(usize, f32)> {
+    let hashes = line.chars().take_while(|c| *c == '#').count();
+    if !(1..=6).contains(&hashes) || !line[hashes..].starts_with(' ') {
+        return None;
+    }
+    let size = match hashes {
+        1 => 28.0,
+        2 => 25.0,
+        3 => 22.0,
+        4 => 20.0,
+        5 => 18.0,
+        _ => 17.0,
+    };
+    Some((hashes + 1, size))
+}
+
+fn is_rule(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed == "---" || trimmed == "***" || trimmed == "___"
+}
+
+/// Сколько символов занимает отступ: маркер списка или ведущие пробелы.
+fn prefix_end(line: &str) -> usize {
+    list_prefix(line)
+        .map(|prefix| prefix.content_start)
+        .unwrap_or_else(|| line.chars().take_while(|c| *c == ' ' || *c == '\t').count())
+}
+
+/// Строка с курсором: её рисуем как обычный текст, иначе при наборе «#»
+/// строка меняет кегль, и курсор прыгает под новую раскладку.
+fn cursor_line(ctx: &egui::Context, id: egui::Id, text: &str) -> Option<usize> {
+    if !ctx.memory(|memory| memory.has_focus(id)) {
+        return None;
+    }
+    let cursor = egui::TextEdit::load_state(ctx, id)?
+        .cursor
+        .char_range()?
+        .primary
+        .index
+        .0;
+    Some(text.chars().take(cursor).filter(|c| *c == '\n').count())
+}
+
+/// Раскладка заметки: заголовки, горизонтальные линии и висячий отступ списков.
+fn note_layouter(
+    ui: &egui::Ui,
+    text: &str,
+    wrap_width: f32,
+    active_line: Option<usize>,
+) -> std::sync::Arc<egui::Galley> {
     let font = theme::body(17.0);
     let color = theme::TEXT;
     let mut galleys = Vec::new();
 
-    for line in text.split('\n') {
-        let prefix = list_prefix(line);
-        let indent = prefix
-            .as_ref()
-            .map(|prefix| {
-                let marker = line[..prefix.content_start].to_owned();
-                let job = egui::text::LayoutJob::simple(marker, font.clone(), color, f32::INFINITY);
-                ui.fonts_mut(|fonts| fonts.layout_job(job).rect.width())
-            })
-            .unwrap_or(0.0);
-        let width = (wrap_width - indent).max(1.0);
-        let mut job = egui::text::LayoutJob::simple(line.to_owned(), font.clone(), color, width);
+    for (index, line) in text.split('\n').enumerate() {
+        // Строку под курсором рисуем без разметки: заголовок становится
+        // крупным только когда курсор уходит на следующую строку.
+        let editing = active_line == Some(index);
+        if !editing && let Some((prefix, size)) = heading_prefix(line) {
+            let mut job = egui::text::LayoutJob::default();
+            job.wrap.max_width = wrap_width;
+            job.keep_trailing_whitespace = true;
+            job.append(
+                &line[..prefix],
+                0.0,
+                egui::text::TextFormat::simple(theme::body(1.0), egui::Color32::TRANSPARENT),
+            );
+            job.append(
+                &line[prefix..],
+                0.0,
+                egui::text::TextFormat::simple(theme::serif(size), color),
+            );
+            let galley = (*ui.fonts_mut(|fonts| fonts.layout_job(job))).clone();
+            galleys.push(std::sync::Arc::new(galley));
+            continue;
+        }
+
+        if !editing && is_rule(line) {
+            let natural = text_width(ui, line, font.clone());
+            let gaps = line.chars().count().saturating_sub(1).max(1) as f32;
+            let extra = ((wrap_width - natural) / gaps).max(0.0);
+            let mut format = egui::text::TextFormat::simple(font.clone(), theme::BG);
+            format.strikethrough = Stroke::new(1.0, theme::LINE);
+            format.line_height = Some(20.0);
+            format.extra_letter_spacing = extra;
+
+            let mut job = egui::text::LayoutJob::default();
+            job.wrap.max_width = wrap_width;
+            job.keep_trailing_whitespace = true;
+            job.append(line, 0.0, format);
+            let galley = (*ui.fonts_mut(|fonts| fonts.layout_job(job))).clone();
+            galleys.push(std::sync::Arc::new(galley));
+            continue;
+        }
+
+        let prefix = prefix_end(line);
+        if prefix == 0 {
+            let mut job =
+                egui::text::LayoutJob::simple(line.to_owned(), font.clone(), color, wrap_width);
+            job.keep_trailing_whitespace = true;
+            let galley = (*ui.fonts_mut(|fonts| fonts.layout_job(job))).clone();
+            galleys.push(std::sync::Arc::new(galley));
+            continue;
+        }
+
+        // Маркер списка бледный, как в прежнем просмотре; переносы строк
+        // выравниваем по тексту, а не по маркеру. Пункты списка чуть
+        // просторнее обычных строк — как было в просмотре.
+        let is_list = list_prefix(line).is_some();
+        let line_height = is_list.then_some(26.0);
+        let prefix_text = &line[..prefix];
+        let prefix_chars = prefix_text.chars().count();
+        let marker_color = if is_list { theme::TEXT_DIM } else { color };
+        let measured = text_width(ui, prefix_text, font.clone());
+        let mut job = egui::text::LayoutJob::default();
+        job.wrap.max_width = (wrap_width - measured).max(1.0);
         job.keep_trailing_whitespace = true;
+        let mut marker_format = egui::text::TextFormat::simple(font.clone(), marker_color);
+        marker_format.line_height = line_height;
+        job.append(prefix_text, 0.0, marker_format);
+        let mut text_format = egui::text::TextFormat::simple(font.clone(), color);
+        text_format.line_height = line_height;
+        job.append(&line[prefix..], 0.0, text_format);
         let mut galley = (*ui.fonts_mut(|fonts| fonts.layout_job(job))).clone();
 
-        if prefix.is_some() && indent > 0.0 {
-            for placed in galley.rows.iter_mut().skip(1) {
-                let row = std::sync::Arc::make_mut(&mut placed.row);
-                for glyph in &mut row.glyphs {
-                    glyph.pos.x += indent;
-                }
-                for vertex in &mut row.visuals.mesh.vertices {
-                    vertex.pos.x += indent;
-                }
-                row.visuals.mesh_bounds =
-                    row.visuals.mesh_bounds.translate(egui::vec2(indent, 0.0));
-                row.size.x += indent;
-            }
+        // Сдвиг берём не из измерения префикса, а из реальной позиции первого
+        // символа текста: так перенос совпадает с ним с точностью до пикселя.
+        let indent = galley
+            .rows
+            .first()
+            .and_then(|row| row.glyphs.get(prefix_chars))
+            .map_or(measured, |glyph| glyph.pos.x);
+        for placed in galley.rows.iter_mut().skip(1) {
+            let Some(first) = placed
+                .row
+                .glyphs
+                .iter()
+                .position(|glyph| !glyph.chr.is_whitespace())
+            else {
+                continue;
+            };
+            placed.pos.x = indent - placed.row.glyphs[first].pos.x;
         }
         galleys.push(std::sync::Arc::new(galley));
     }
@@ -1530,6 +1707,207 @@ fn note_layouter(ui: &egui::Ui, text: &str, wrap_width: f32) -> std::sync::Arc<e
         &galleys,
         ui.ctx().pixels_per_point(),
     ))
+}
+
+/// Забирает Enter из очереди событий: его обрабатываем сами, до TextEdit.
+fn take_enter(ui: &mut egui::Ui) -> Option<bool> {
+    let mut shift = None;
+    ui.input_mut(|input| {
+        input.events.retain(|event| {
+            if let egui::Event::Key {
+                key: egui::Key::Enter,
+                pressed: true,
+                modifiers,
+                ..
+            } = event
+                && !modifiers.command
+                && !modifiers.alt
+            {
+                if shift.is_none() {
+                    shift = Some(modifiers.shift);
+                }
+                false
+            } else {
+                true
+            }
+        });
+    });
+    shift
+}
+
+/// Enter в заметке: новый пункт списка, мягкий перенос или пустая строка
+/// после заголовка. Всё делаем до TextEdit, чтобы не было мигания курсора.
+fn handle_enter(ui: &mut egui::Ui, id: egui::Id, text: &mut String) {
+    if !ui.memory(|memory| memory.has_focus(id)) {
+        return;
+    }
+    let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), id) else {
+        return;
+    };
+    let Some(range) = state.cursor.char_range() else {
+        return;
+    };
+    if range.primary.index != range.secondary.index {
+        return;
+    }
+    let Some(shift) = take_enter(ui) else {
+        return;
+    };
+
+    let chars: Vec<char> = text.chars().collect();
+    let cursor = range.primary.index.0.min(chars.len());
+    let at_line_end = chars[cursor..]
+        .iter()
+        .position(|&c| c == '\n')
+        .is_none_or(|offset| offset == 0);
+
+    let mut new_chars = chars;
+    new_chars.insert(cursor, '\n');
+    *text = new_chars.into_iter().collect();
+    state
+        .cursor
+        .set_char_range(Some(egui::text::CCursorRange::one(
+            egui::text::CCursor::new(cursor + 1),
+        )));
+    state.store(ui.ctx(), id);
+
+    if shift {
+        // Мягкий перенос с отступом до текста пункта.
+        soft_line_indent(ui, id, text);
+    } else {
+        continue_list(text, ui.ctx(), id);
+        if at_line_end {
+            gap_after_heading(text, ui.ctx(), id);
+        }
+    }
+}
+
+/// После заголовка оставляем пустую строку — если следующая строка не заголовок.
+fn gap_after_heading(text: &mut String, ctx: &egui::Context, id: egui::Id) {
+    let Some(mut state) = egui::TextEdit::load_state(ctx, id) else {
+        return;
+    };
+    let Some(range) = state.cursor.char_range() else {
+        return;
+    };
+    let cursor = range.primary.index.0;
+    let chars: Vec<char> = text.chars().collect();
+    if cursor == 0 || chars.get(cursor - 1) != Some(&'\n') {
+        return;
+    }
+
+    let prev_end = cursor - 1;
+    let prev_start = chars[..prev_end]
+        .iter()
+        .rposition(|&c| c == '\n')
+        .map_or(0, |i| i + 1);
+    let prev: String = chars[prev_start..prev_end].iter().collect();
+    if heading_prefix(&prev).is_none() {
+        return;
+    }
+
+    let line_end = chars[cursor..]
+        .iter()
+        .position(|&c| c == '\n')
+        .map_or(chars.len(), |i| cursor + i);
+    let line: String = chars[cursor..line_end].iter().collect();
+    // Подряд идущие заголовки стоят без пустой строки.
+    if heading_prefix(&line).is_some() {
+        return;
+    }
+    // Пустая строка уже есть — курсор просто стоит в ней.
+    if line.trim().is_empty() && line_end < chars.len() {
+        return;
+    }
+
+    let mut new_chars = chars;
+    new_chars.insert(cursor, '\n');
+    *text = new_chars.into_iter().collect();
+    state
+        .cursor
+        .set_char_range(Some(egui::text::CCursorRange::one(
+            egui::text::CCursor::new(cursor + 1),
+        )));
+    state.store(ctx, id);
+}
+
+/// Shift+Enter: перенос с отступом до текста списка.
+fn soft_line_indent(ui: &egui::Ui, id: egui::Id, text: &mut String) {
+    let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), id) else {
+        return;
+    };
+    let Some(range) = state.cursor.char_range() else {
+        return;
+    };
+    let cursor = range.primary.index.0;
+    let chars: Vec<char> = text.chars().collect();
+    if cursor == 0 || chars.get(cursor - 1) != Some(&'\n') {
+        return;
+    }
+
+    let prev_end = cursor - 1;
+    let prev_start = chars[..prev_end]
+        .iter()
+        .rposition(|&c| c == '\n')
+        .map_or(0, |i| i + 1);
+    let prev: String = chars[prev_start..prev_end].iter().collect();
+    let prefix = prefix_end(&prev);
+    if prefix == 0 {
+        return;
+    }
+
+    let font = theme::body(17.0);
+    let prefix_width = text_width(ui, &prev[..prefix], font.clone());
+    let space_width = text_width(ui, " ", font);
+    if space_width <= 0.0 {
+        return;
+    }
+    let spaces = (prefix_width / space_width).round() as usize;
+    if spaces == 0 {
+        return;
+    }
+
+    let mut new_chars = chars;
+    new_chars.splice(cursor..cursor, std::iter::repeat_n(' ', spaces));
+    *text = new_chars.into_iter().collect();
+    state
+        .cursor
+        .set_char_range(Some(egui::text::CCursorRange::one(
+            egui::text::CCursor::new(cursor + spaces),
+        )));
+    state.store(ui.ctx(), id);
+}
+
+/// Закрывающий символ для открывающей скобки или кавычки.
+fn pair_for(open: char) -> Option<char> {
+    match open {
+        '(' => Some(')'),
+        '[' => Some(']'),
+        '{' => Some('}'),
+        '"' => Some('"'),
+        '«' => Some('»'),
+        _ => None,
+    }
+}
+
+/// Пара для оборачивания выделения: годится и закрывающая скобка.
+fn wrap_pair(ch: char) -> Option<(char, char)> {
+    match ch {
+        '(' | ')' => Some(('(', ')')),
+        '[' | ']' => Some(('[', ']')),
+        '{' | '}' => Some(('{', '}')),
+        '"' => Some(('"', '"')),
+        '«' | '»' => Some(('«', '»')),
+        _ => None,
+    }
+}
+
+/// Кавычка сразу после слова — закрывающая, вторую не ставим.
+fn closing_quote(chars: &[char], cursor: usize) -> bool {
+    cursor
+        .checked_sub(1)
+        .and_then(|index| chars.get(index))
+        .is_some_and(|prev| prev.is_alphanumeric())
 }
 
 /// До вставки текста в поле дописывает парную скобку или кавычку.
@@ -1545,45 +1923,123 @@ fn auto_close(ui: &mut egui::Ui, id: egui::Id, text: &mut String) {
     let Some(range) = state.cursor.char_range() else {
         return;
     };
-    if range.primary.index != range.secondary.index {
+    // Поле могло получить другой текст с тем же id: курсор из прошлого
+    // состояния бывает дальше конца строки.
+    let len = text.chars().count();
+    let primary = range.primary.index.0.min(len);
+    let secondary = range.secondary.index.0.min(len);
+    if primary != secondary {
+        let start = primary.min(secondary);
+        let end = primary.max(secondary);
+
+        let events = ui.input_mut(|input| std::mem::take(&mut input.events));
+        let mut kept = Vec::new();
+        let mut wrapped = None;
+        for event in events {
+            if wrapped.is_none()
+                && let egui::Event::Text(value) = &event
+                && value.chars().count() == 1
+                && let Some(pair) = value.chars().next().and_then(wrap_pair)
+            {
+                wrapped = Some(pair);
+            } else {
+                kept.push(event);
+            }
+        }
+        ui.input_mut(|input| input.events = kept);
+
+        let Some((open, close)) = wrapped else {
+            return;
+        };
+        let chars: Vec<char> = text.chars().collect();
+        let mut new_chars = Vec::with_capacity(chars.len() + 2);
+        new_chars.extend_from_slice(&chars[..start]);
+        new_chars.push(open);
+        new_chars.extend_from_slice(&chars[start..end]);
+        new_chars.push(close);
+        new_chars.extend_from_slice(&chars[end..]);
+        *text = new_chars.into_iter().collect();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(end + 2),
+            )));
+        state.store(ui.ctx(), id);
         return;
+    }
+
+    let cursor = primary;
+    let mut chars: Vec<char> = text.chars().collect();
+
+    // Backspace внутри пустой пары стирает обе скобки: `("")` → `""`.
+    if cursor > 0
+        && let Some(close) = pair_for(chars[cursor - 1])
+        && chars.get(cursor) == Some(&close)
+    {
+        let pressed = ui.input_mut(|input| {
+            let before = input.events.len();
+            input.events.retain(|event| {
+                !matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::Backspace,
+                        pressed: true,
+                        ..
+                    }
+                )
+            });
+            before != input.events.len()
+        });
+        if pressed {
+            chars.remove(cursor);
+            chars.remove(cursor - 1);
+            *text = chars.into_iter().collect();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(cursor - 1),
+                )));
+            state.store(ui.ctx(), id);
+            return;
+        }
     }
 
     let events = ui.input_mut(|input| std::mem::take(&mut input.events));
     let mut kept = Vec::new();
-    let mut cursor = range.primary.index.0;
-    let mut chars: Vec<char> = text.chars().collect();
+    let mut cursor = cursor;
     let mut changed = false;
 
     for event in events {
-        match event {
-            egui::Event::Text(value) if value == "(" => {
-                chars.insert(cursor, '(');
-                chars.insert(cursor + 1, ')');
+        let egui::Event::Text(value) = &event else {
+            kept.push(event);
+            continue;
+        };
+        let mut symbols = value.chars();
+        let Some(ch) = symbols.next() else {
+            kept.push(event);
+            continue;
+        };
+        if symbols.next().is_some() {
+            // Вставка нескольких символов — не наше дело.
+            kept.push(event);
+            continue;
+        }
+
+        if matches!(ch, ')' | ']' | '}' | '"' | '»') && chars.get(cursor) == Some(&ch) {
+            // Пользователь сам набрал закрывающую — перешагиваем авто-пару.
+            cursor += 1;
+            changed = true;
+        } else if let Some(close) = pair_for(ch) {
+            if ch == '"' && closing_quote(&chars, cursor) {
+                kept.push(event);
+            } else {
+                chars.insert(cursor, ch);
+                chars.insert(cursor + 1, close);
                 cursor += 1;
                 changed = true;
             }
-            egui::Event::Text(value) if value == ")" => {
-                if chars.get(cursor) == Some(&')') {
-                    // Пользователь сам набрал закрывающую — перешагиваем авто-пару.
-                    cursor += 1;
-                    changed = true;
-                } else {
-                    kept.push(egui::Event::Text(value));
-                }
-            }
-            egui::Event::Text(value) if value == "\"" => {
-                if chars.get(cursor) == Some(&'"') {
-                    cursor += 1;
-                    changed = true;
-                } else {
-                    chars.insert(cursor, '"');
-                    chars.insert(cursor + 1, '"');
-                    cursor += 1;
-                    changed = true;
-                }
-            }
-            other => kept.push(other),
+        } else {
+            kept.push(event);
         }
     }
     ui.input_mut(|input| input.events = kept);
@@ -1599,85 +2055,6 @@ fn auto_close(ui: &mut egui::Ui, id: egui::Id, text: &mut String) {
             egui::text::CCursor::new(cursor),
         )));
     state.store(ui.ctx(), id);
-}
-
-/// Просмотр заметки: заголовки markdown, горизонтальные линии, списки.
-fn markdown_preview(ui: &mut egui::Ui, text: &str) {
-    if text.trim().is_empty() {
-        ui.label(
-            RichText::new("Пока пусто")
-                .font(theme::body(15.0))
-                .color(theme::TEXT_DIM),
-        );
-        return;
-    }
-
-    for line in text.lines() {
-        let trimmed = line.trim_end();
-        if trimmed == "---" || trimmed == "***" || trimmed == "___" {
-            ui.add_space(6.0);
-            ui.separator();
-            ui.add_space(6.0);
-            continue;
-        }
-
-        let hashes = trimmed.chars().take_while(|c| *c == '#').count();
-        if (1..=6).contains(&hashes) && trimmed[hashes..].starts_with(' ') {
-            let size = match hashes {
-                1 => 28.0,
-                2 => 25.0,
-                3 => 22.0,
-                4 => 20.0,
-                5 => 18.0,
-                _ => 17.0,
-            };
-            ui.add_space(4.0);
-            ui.add(
-                egui::Label::new(
-                    RichText::new(trimmed[hashes..].trim_start())
-                        .font(theme::serif(size))
-                        .color(theme::TEXT),
-                )
-                .wrap(),
-            );
-            ui.add_space(2.0);
-            continue;
-        }
-
-        if trimmed.is_empty() {
-            ui.add_space(8.0);
-            continue;
-        }
-
-        if let Some(prefix) = list_prefix(line) {
-            ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                ui.label(
-                    RichText::new(&line[..prefix.content_start])
-                        .font(theme::body(17.0))
-                        .color(theme::TEXT_DIM),
-                );
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(&line[prefix.content_start..])
-                            .font(theme::body(17.0))
-                            .color(theme::TEXT),
-                    )
-                    .wrap(),
-                );
-            });
-            continue;
-        }
-
-        ui.add(
-            egui::Label::new(
-                RichText::new(line)
-                    .font(theme::body(17.0))
-                    .color(theme::TEXT),
-            )
-            .wrap(),
-        );
-    }
 }
 
 /// Ширина колонки контента: как страница, а не форма на весь экран.
@@ -1830,6 +2207,8 @@ impl eframe::App for App {
                 .send_viewport_cmd(egui::ViewportCommand::Maximized(true));
         }
 
+        self.show_toast(ui.ctx());
+
         egui::Frame::NONE
             .fill(theme::BG)
             .inner_margin(WINDOW_MARGIN)
@@ -1883,10 +2262,10 @@ mod tests {
             note: String::new(),
             dream_unknown: false,
             note_draft: None,
-            note_preview: false,
             task_draft: None,
             status: None,
             error: None,
+            toast: None,
             entries: Vec::new(),
             pending_delete: None,
             focus_new: false,
@@ -2159,12 +2538,19 @@ mod tests {
                 ui,
                 "1. Очень длинный пункт списка, который должен переноситься на следующую строку и выравниваться по тексту, а не под цифрой.",
                 300.0,
+                None,
             ));
         });
         let galley = galley.unwrap();
         assert!(galley.rows.len() >= 2, "строка должна перенестись");
         let text_x = galley.rows[0].glyphs[3].pos.x;
-        let wrapped_x = galley.rows[1].glyphs[0].pos.x;
+        let row = &galley.rows[1];
+        let first = row
+            .glyphs
+            .iter()
+            .find(|glyph| !glyph.chr.is_whitespace())
+            .unwrap();
+        let wrapped_x = row.pos.x + first.pos.x;
         assert!(text_x > 5.0, "маркер должен занимать место: {text_x}");
         assert!(
             (text_x - wrapped_x).abs() < 1.0,
@@ -2173,10 +2559,57 @@ mod tests {
     }
 
     #[test]
-    fn markdown_preview_renders_without_panic() {
+    fn heading_is_plain_on_the_cursor_line() {
+        let mut heights = (0.0, 0.0);
         egui::__run_test_ui(|ui| {
-            markdown_preview(ui, "# Заголовок\n\n---\n\n- пункт\nобычный текст");
+            let heading = note_layouter(ui, "# Заголовок", 300.0, None);
+            let editing = note_layouter(ui, "# Заголовок", 300.0, Some(0));
+            heights = (heading.rows[0].size.y, editing.rows[0].size.y);
         });
+        assert!(
+            heights.0 > heights.1 + 3.0,
+            "заголовок {} должен быть крупнее строки под курсором {}",
+            heights.0,
+            heights.1
+        );
+    }
+
+    #[test]
+    fn selection_is_wrapped_in_pairs() {
+        fn wrap(initial: &str, start: usize, end: usize, typed: &str) -> String {
+            let ctx = egui::Context::default();
+            ctx.set_fonts(egui::FontDefinitions::empty());
+            let mut text = initial.to_owned();
+            let body_id = egui::Id::unique("wrap-selection");
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let response = ui.add(egui::TextEdit::singleline(&mut text).id(body_id));
+                response.request_focus();
+            });
+            output.drop_without_applying_deltas();
+            let mut state = egui::TextEdit::load_state(&ctx, body_id).unwrap_or_default();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(start),
+                    egui::text::CCursor::new(end),
+                )));
+            state.store(&ctx, body_id);
+
+            let input = egui::RawInput {
+                events: vec![egui::Event::Text(typed.to_owned())],
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                auto_close(ui, body_id, &mut text);
+                ui.add(egui::TextEdit::singleline(&mut text).id(body_id));
+            });
+            output.drop_without_applying_deltas();
+            text
+        }
+
+        assert_eq!(wrap("текст", 0, 5, "("), "(текст)");
+        assert_eq!(wrap("текст", 1, 4, ")"), "т(екс)т");
+        assert_eq!(wrap("текст", 0, 5, "\""), "\"текст\"");
     }
 
     #[test]
@@ -2217,6 +2650,183 @@ mod tests {
         assert_eq!(typed(&["(", "т", "е", "с", "т", ")"]), "(тест)");
         assert_eq!(typed(&["\""]), "\"\"");
         assert_eq!(typed(&["\"", "т", "е", "с", "т", "\""]), "\"тест\"");
+        assert_eq!(typed(&["["]), "[]");
+        assert_eq!(typed(&["{"]), "{}");
+        assert_eq!(typed(&["«"]), "«»");
+    }
+
+    /// Набирает один символ в поле с курсором в конце текста.
+    fn type_at_end(initial: &str, typed: &str) -> String {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::empty());
+        let mut text = initial.to_owned();
+        let id = egui::Id::unique("type-at-end");
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let response = ui.add(egui::TextEdit::singleline(&mut text).id(id));
+            response.request_focus();
+        });
+        output.drop_without_applying_deltas();
+        let mut state = egui::TextEdit::load_state(&ctx, id).unwrap_or_default();
+        let end = text.chars().count();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(end),
+            )));
+        state.store(&ctx, id);
+
+        let input = egui::RawInput {
+            events: vec![egui::Event::Text(typed.to_owned())],
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            auto_close(ui, id, &mut text);
+            ui.add(egui::TextEdit::singleline(&mut text).id(id));
+        });
+        output.drop_without_applying_deltas();
+        text
+    }
+
+    #[test]
+    fn quote_after_word_is_not_doubled() {
+        assert_eq!(type_at_end("слово", "\""), "слово\"");
+        assert_eq!(type_at_end("", "\""), "\"\"");
+        assert_eq!(type_at_end("слово ", "\""), "слово \"\"");
+    }
+
+    #[test]
+    fn stale_cursor_does_not_panic() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::empty());
+        let mut text = String::new();
+        let id = egui::Id::unique("stale-cursor");
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let response = ui.add(egui::TextEdit::singleline(&mut text).id(id));
+            response.request_focus();
+        });
+        output.drop_without_applying_deltas();
+        let mut state = egui::TextEdit::load_state(&ctx, id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(10),
+            )));
+        state.store(&ctx, id);
+
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Backspace,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            auto_close(ui, id, &mut text);
+            ui.add(egui::TextEdit::singleline(&mut text).id(id));
+        });
+        output.drop_without_applying_deltas();
+        assert_eq!(text, "");
+    }
+
+    #[test]
+    fn backspace_removes_an_empty_pair() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::empty());
+        let mut text = "\"\"".to_owned();
+        let id = egui::Id::unique("backspace-pair");
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let response = ui.add(egui::TextEdit::singleline(&mut text).id(id));
+            response.request_focus();
+        });
+        output.drop_without_applying_deltas();
+        let mut state = egui::TextEdit::load_state(&ctx, id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(1),
+            )));
+        state.store(&ctx, id);
+
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Backspace,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            auto_close(ui, id, &mut text);
+            ui.add(egui::TextEdit::singleline(&mut text).id(id));
+        });
+        output.drop_without_applying_deltas();
+        assert_eq!(text, "");
+    }
+
+    fn run_enter(initial: &str, cursor: usize) -> (String, usize) {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::empty());
+        let mut text = initial.to_owned();
+        let id = egui::Id::unique("enter-test");
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let response = ui.add(egui::TextEdit::multiline(&mut text).id(id));
+            response.request_focus();
+        });
+        output.drop_without_applying_deltas();
+        let mut state = egui::TextEdit::load_state(&ctx, id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(cursor),
+            )));
+        state.store(&ctx, id);
+
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            handle_enter(ui, id, &mut text);
+            ui.add(egui::TextEdit::multiline(&mut text).id(id));
+        });
+        output.drop_without_applying_deltas();
+        let state = egui::TextEdit::load_state(&ctx, id).unwrap_or_default();
+        let cursor = state
+            .cursor
+            .char_range()
+            .map_or(0, |range| range.primary.index.0);
+        (text, cursor)
+    }
+
+    #[test]
+    fn heading_gets_a_blank_line_after_enter() {
+        let (text, cursor) = run_enter("# Заголовок", "# Заголовок".chars().count());
+        assert_eq!(text, "# Заголовок\n\n");
+        assert_eq!(cursor, text.chars().count());
+    }
+
+    #[test]
+    fn next_heading_gets_no_extra_blank_line() {
+        let (text, _) = run_enter("# А\n## Б", "# А".chars().count());
+        assert_eq!(text, "# А\n\n## Б");
+    }
+
+    #[test]
+    fn list_item_gets_no_blank_line() {
+        let (text, cursor) = run_enter("1. пункт", "1. пункт".chars().count());
+        assert_eq!(text, "1. пункт\n2. ");
+        assert_eq!(cursor, text.chars().count());
     }
 
     #[test]
