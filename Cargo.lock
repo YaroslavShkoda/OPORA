@@ -2356,8 +2356,10 @@ dependencies = [
  "chrono",
  "eframe",
  "egui_plot",
+ "raw-window-handle",
  "rusqlite",
  "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

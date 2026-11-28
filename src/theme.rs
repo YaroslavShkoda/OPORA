@@ -22,6 +22,8 @@ pub const TEXT_DIM: Color32 = Color32::from_rgb(0x8E, 0x87, 0x7E);
 pub const ACCENT: Color32 = Color32::from_rgb(0xC8, 0xA1, 0x5A);
 /// Линии вместо рамок.
 pub const LINE: Color32 = Color32::from_rgb(0x35, 0x31, 0x3A);
+/// Ошибки и удаление.
+pub const ERROR: Color32 = Color32::from_rgb(0xD0, 0x6C, 0x5E);
 
 const SERIF: &str = "serif";
 
@@ -81,6 +83,8 @@ fn apply_style(style: &mut egui::Style) {
     visuals.faint_bg_color = SURFACE;
     visuals.selection.bg_fill = ACCENT.gamma_multiply(0.35);
     visuals.selection.stroke = Stroke::new(1.0, TEXT);
+    // Курсор ввода — бумажный, вместо синего по умолчанию.
+    visuals.text_cursor.stroke = Stroke::new(1.5, TEXT);
 
     for widget in [
         &mut visuals.widgets.noninteractive,

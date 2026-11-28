@@ -10,5 +10,11 @@ eframe = "0.37.0"
 egui_plot = "0.38.0"
 rusqlite = { version = "0.43.0", features = ["bundled"] }
 
+# Цвет заголовка окна Windows задаётся только через DWM. Оба крейта уже
+# есть в дереве зависимостей eframe/winit, новых версий не подтягивается.
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
+
 [dev-dependencies]
 tempfile = "3.27.0"

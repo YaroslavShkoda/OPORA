@@ -20,6 +20,8 @@ fn main() -> anyhow::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
+            // Разворот на весь экран делает App: на скрытом окне with_maximized
+            // уводит окно за экран, поэтому здесь только стартовый размер.
             .with_inner_size([900.0, 640.0])
             .with_min_inner_size([720.0, 520.0])
             .with_title("OPORA"),
